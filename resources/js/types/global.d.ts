@@ -6,6 +6,7 @@ declare module '@inertiajs/core' {
     export interface InertiaConfig {
         flashDataType: {
             toast?: FlashToast;
+            achievementsUnlocked?: string[];
             committed?: CommittedFlash;
             deleted?: DeletedFlash;
             restored?: Commit;
@@ -18,6 +19,8 @@ declare module '@inertiajs/core' {
             hasUnmoderatedCommits: boolean;
             sidebarOpen: boolean;
             showsWhoToFollow: boolean;
+            dimsLanes: boolean;
+            repliesPerPage: number;
             suggestedUsers?: SuggestedUser[];
             [key: string]: unknown;
         };
