@@ -6,6 +6,7 @@ use App\Actions\CreateQuoteNotifications;
 use App\Actions\DeleteUser;
 use App\Enums\CommitStatus;
 use App\Enums\Log;
+use App\Http\Middleware\HandleInertiaRequests;
 use App\Jobs\UnfurlLink;
 use App\Models\Commit;
 use App\Models\CommitImage;
@@ -66,6 +67,23 @@ it('does not count the authenticated user relations when redirecting after a com
         ->each->not->toContain('count(*)');
 });
 
+it('rejects non-text commit bodies with a validation error', function (mixed $body): void {
+    $this->actingAs(User::factory()->create())
+        ->postJson(route('commit.store'), ['body' => $body])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors('body');
+
+    expect(Commit::query()->count())->toBe(0)
+        ->and(LinkPreview::query()->count())->toBe(0);
+})->with([
+    'list' => [['Hello, world!']],
+    'object' => [['text' => 'Hello, world!']],
+    'empty array' => [[]],
+    'number' => [123],
+    'boolean' => [true],
+    'null' => [null],
+]);
+
 it('requires a body', function (): void {
     $user = User::factory()->create();
 
@@ -96,19 +114,40 @@ it('requires the body to be at least 3 characters', function (): void {
     expect(Commit::query()->count())->toBe(0);
 });
 
-it('requires the body to be at most 280 characters', function (): void {
+it('requires the body to be at most 4,000 characters', function (): void {
     $user = User::factory()->create();
 
     $response = $this->actingAs($user)
         ->fromRoute('log.show', Log::Following)
         ->post(route('commit.store'), [
-            'body' => str_repeat('a', 281),
+            'body' => str_repeat('a', 4001),
         ]);
 
     $response->assertRedirectToRoute('log.show', Log::Following)
         ->assertSessionHasErrors('body');
 
     expect(Commit::query()->count())->toBe(0);
+});
+
+it('accepts a body of 4,000 characters, counting multibyte characters as one', function (): void {
+    $body = str_repeat('é', 3998).'🚀🚀';
+
+    $this->actingAs(User::factory()->create())
+        ->post(route('commit.store'), ['body' => $body])
+        ->assertSessionHasNoErrors();
+
+    expect(Commit::query()->sole()->body)->toBe($body);
+});
+
+it('collapses runs of blank lines in the prose before measuring the body, leaving code alone', function (): void {
+    $code = "```python\ndef a():\n    pass\n\n\ndef b():\n    pass\n```";
+    $body = "First\n\n\n\n\nSecond \n \n\nThird\n{$code}\n\n\n".str_repeat('a', 3900);
+
+    $this->actingAs(User::factory()->create())
+        ->post(route('commit.store'), ['body' => $body])
+        ->assertSessionHasNoErrors();
+
+    expect(Commit::query()->sole()->body)->toBe("First\n\nSecond\n\nThird\n{$code}\n\n".str_repeat('a', 3900));
 });
 
 it('rate limits commit creation', function (): void {
@@ -530,6 +569,38 @@ it('shows a commit with its ancestors and reply count', function (): void {
             ->missing('commit.user.email'));
 });
 
+it('shows the thread the author wrote after the commit and leaves it out of its replies', function (): void {
+    $author = User::factory()->create();
+    $commit = Commit::factory()->for($author)->create();
+    $second = Commit::factory()->for($commit, 'parent')->for($author)->create(['created_at' => now()->subMinutes(2)]);
+    $reply = Commit::factory()->for($commit, 'parent')->create(['created_at' => now()->subMinute()]);
+    $third = Commit::factory()->for($second, 'parent')->for($author)->create();
+
+    $response = $this->actingAs(User::factory()->create())
+        ->get(route('commit.show', [$author, $commit]));
+
+    $response->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('commit/show')
+            ->where('commit.replies_count', 1)
+            ->where('commit.continuation_id', $second->id)
+            ->has('continuation.data', 2)
+            ->where('continuation.data.0.id', $second->id)
+            ->where('continuation.data.0.replies_count', 0)
+            ->where('continuation.data.1.id', $third->id)
+            ->where('continuation.data.1.user.username', $author->username)
+            ->where('continuation.position', 1)
+            ->where('continuation.length', 2)
+            ->where('continuation.is_capped', false)
+            ->where('continuation.next_id', null)
+            ->where('replies', null));
+
+    $this->getJson(route('commit-reply.index', [$commit, 'except' => $second->id]))
+        ->assertOk()
+        ->assertJsonCount(1, 'data')
+        ->assertJsonPath('data.0.id', $reply->id);
+});
+
 it('shows the commit and its replies split into prose and highlighted code', function (): void {
     $commit = Commit::factory()->create(['body' => "Run `make` :fire\n```php\n\$name = '<b>';\n```"]);
     Commit::factory()->for($commit, 'parent')->create(['body' => 'try `make test`']);
@@ -608,6 +679,48 @@ it('shows the first 50 replies of a commit with a cursor to the rest', function 
             ->where('replies.data.1.body', 'Reply 1')
             ->where('replies.data.49.body', 'Reply 49')
             ->where('replies.next_cursor', fn (string $cursor): bool => $cursor !== ''));
+});
+
+it('reloads the commit alone without loading its thread', function (): void {
+    $viewer = User::factory()->create();
+    $queries = function (Commit $commit) use ($viewer): int {
+        $this->actingAs($viewer)
+            ->get(route('commit.show', [$commit->user, $commit]))
+            ->assertOk()
+            ->assertInertia(function ($page): void {
+                DB::flushQueryLog();
+                DB::enableQueryLog();
+
+                $page->reloadOnly('commit', fn ($reload) => $reload->missing('replies')->missing('ancestors')->missing('series'));
+
+                DB::disableQueryLog();
+            });
+
+        return count(DB::getQueryLog());
+    };
+    $alone = Commit::factory()->create();
+    $inThread = Commit::factory()->for(Commit::factory()->for(Commit::factory(), 'parent'), 'parent')->create();
+    Commit::factory()->for($inThread, 'parent')->count(3)->create();
+
+    expect($queries($inThread))->toBe($queries($alone));
+});
+
+it('builds the link preview only for full page loads', function (): void {
+    $commit = Commit::factory()->create();
+    Commit::factory()->for($commit, 'parent')->create();
+    $queries = function (array $headers) use ($commit): int {
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+
+        $this->get(route('commit.show', [$commit->user, $commit]), $headers)->assertOk();
+
+        DB::disableQueryLog();
+
+        return count(DB::getQueryLog());
+    };
+
+    expect($queries(['X-Inertia' => 'true', 'X-Inertia-Version' => (string) new HandleInertiaRequests()->version(request())]))
+        ->toBeLessThan($queries([]));
 });
 
 it('shows own pending commit', function (): void {
@@ -717,17 +830,6 @@ it('shows guests the commit with its approved replies and a link preview', funct
     $this->assertGuest();
 
     expect(session('url.intended'))->toBe(route('commit.show', [$user, $commit]));
-});
-
-it('does not show a later part of a series as a reply in the link preview', function (): void {
-    $user = User::factory()->create(['username' => 'octocat', 'name' => 'The Octocat']);
-    $parts = commitSeries($user);
-
-    $response = $this->get(route('commit.show', [$user, $parts[1]]));
-
-    $response->assertOk()
-        ->assertSee('<meta property="og:title" content="The Octocat (@octocat) on /dev/null: “', false)
-        ->assertDontSee('(@octocat) replying to', false);
 });
 
 it('trims long commits in the link preview description', function (): void {
@@ -906,6 +1008,23 @@ it('changes the link preview image version only when the public commit changes',
     expect($version())->not->toBe($initial);
 });
 
+it('changes the link preview image version only when something drawn of the author changes', function (): void {
+    $commit = Commit::factory()->for(User::factory()->state(['log' => Log::Following]))->create();
+
+    $version = fn (): string => Str::betweenFirst((string) $this->get(route('commit.show', [$commit->user, $commit]))->getContent(), 'og.png?v=', '"');
+
+    $initial = $version();
+
+    $this->travel(1)->minute();
+    $commit->user->update(['log' => Log::Trending]);
+
+    expect($version())->toBe($initial);
+
+    $commit->user->update(['name' => 'The Octocat']);
+
+    expect($version())->not->toBe($initial);
+});
+
 it('returns not found to guests for commits that are not approved', function (Closure $factory): void {
     $commit = $factory();
 
@@ -941,17 +1060,6 @@ it('keeps the default link preview for signed-in users on a commit', function ()
         ->assertDontSee('og:url', false);
 });
 
-it('returns to the intended commit after local sign in', function (): void {
-    app()->instance('env', 'local');
-    config()->set('app.auto_login', true);
-
-    $commit = Commit::factory()->create();
-
-    $this->get(route('commit.show', [$commit->user, $commit]))->assertRedirectToRoute('home');
-
-    $this->get(route('home'))->assertRedirect(route('commit.show', [$commit->user, $commit]));
-});
-
 it('queues a link preview for a commit with a link', function (): void {
     Queue::fake();
 
@@ -970,8 +1078,9 @@ it('queues a link preview for a commit with a link', function (): void {
     Queue::assertPushed(UnfurlLink::class);
 });
 
-it('queues a link preview for the link the author chose', function (): void {
+it('keeps attached images with the link card the author chose', function (): void {
     Queue::fake();
+    Storage::fake();
 
     $user = User::factory()->create();
 
@@ -980,11 +1089,18 @@ it('queues a link preview for the link the author chose', function (): void {
         ->post(route('commit.store'), [
             'body' => 'Shipped https://example.com/first, docs at laravel.com',
             'link_preview_url' => 'https://laravel.com',
+            'images' => [UploadedFile::fake()->image('draft.png', 10, 10)],
+            'image_descriptions' => ['The shipped feature.'],
         ]);
 
     $response->assertRedirectToRoute('log.show', Log::Following);
 
-    expect($user->commits()->sole()->linkPreview->url)->toBe('https://laravel.com');
+    $commit = $user->commits()->sole();
+
+    expect($commit->linkPreview->url)->toBe('https://laravel.com')
+        ->and($commit->images->sole()->description)->toBe('The shipped feature.')
+        ->and($commit->images)->toHaveCount(1)
+        ->and(Storage::disk()->allFiles('commit-images'))->toHaveCount(1);
 
     Queue::assertPushed(UnfurlLink::class);
 });
@@ -1054,7 +1170,7 @@ it('may attach images to a commit', function (): void {
             'body' => 'Look at this',
             'images' => [
                 UploadedFile::fake()->image('first.jpg', 40, 30),
-                UploadedFile::fake()->image('second.gif', 10, 10),
+                UploadedFile::fake()->image('second.png', 10, 10),
                 UploadedFile::fake()->image('third.webp', 10, 10),
             ],
         ]);
@@ -1067,6 +1183,63 @@ it('may attach images to a commit', function (): void {
     expect($commit->status)->toBe(CommitStatus::Pending)
         ->and($commit->images)->toHaveCount(3)
         ->and(Storage::disk()->allFiles('commit-images'))->toHaveCount(3);
+});
+
+it('may commit images without a body', function (array $body): void {
+    Storage::fake();
+
+    $user = User::factory()->create();
+
+    $response = $this->actingAs($user)
+        ->fromRoute('log.show', Log::Following)
+        ->post(route('commit.store'), [
+            ...$body,
+            'images' => [UploadedFile::fake()->image('screenshot.png', 40, 30)],
+        ]);
+
+    $response->assertRedirectToRoute('log.show', Log::Following)
+        ->assertSessionHasNoErrors();
+
+    $commit = $user->commits()->sole();
+
+    expect($commit->body)->toBe('')
+        ->and($commit->images)->toHaveCount(1);
+})->with([
+    'missing' => [[]],
+    'blank' => [['body' => '   ']],
+]);
+
+it('may commit images with a body shorter than 3 characters', function (): void {
+    Storage::fake();
+
+    $user = User::factory()->create();
+
+    $this->actingAs($user)
+        ->post(route('commit.store'), [
+            'body' => 'ok',
+            'images' => [UploadedFile::fake()->image('screenshot.png', 40, 30)],
+        ])
+        ->assertSessionHasNoErrors();
+
+    expect($user->commits()->sole()->body)->toBe('ok');
+});
+
+it('may quote a commit with only images', function (): void {
+    Storage::fake();
+
+    $user = User::factory()->create();
+    $quoted = Commit::factory()->create();
+
+    $this->actingAs($user)
+        ->post(route('commit.store'), [
+            'quoted_commit_id' => $quoted->id,
+            'images' => [UploadedFile::fake()->image('screenshot.png', 40, 30)],
+        ])
+        ->assertSessionHasNoErrors();
+
+    expect($user->commits()->sole())
+        ->body->toBe('')
+        ->quoted_commit_id->toBe($quoted->id);
 });
 
 it('may describe the images attached to a commit', function (): void {
@@ -1159,7 +1332,7 @@ it('may not attach more than three images to a commit', function (): void {
     expect($user->commits()->count())->toBe(0);
 });
 
-it('may only attach jpeg, png, gif or webp images to a commit', function (UploadedFile $file): void {
+it('may only attach jpeg, png or webp images to a commit', function (UploadedFile $file): void {
     Storage::fake();
 
     $user = User::factory()->create();
@@ -1177,6 +1350,7 @@ it('may only attach jpeg, png, gif or webp images to a commit', function (Upload
     'svg' => fn (): UploadedFile => UploadedFile::fake()->createWithContent('image.svg', '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'),
     'html disguised as png' => fn (): UploadedFile => UploadedFile::fake()->createWithContent('image.png', '<html><script>alert(1)</script></html>'),
     'bmp' => fn (): UploadedFile => UploadedFile::fake()->image('image.bmp', 10, 10),
+    'gif' => fn (): UploadedFile => UploadedFile::fake()->image('image.gif', 10, 10),
     'pdf' => fn (): UploadedFile => UploadedFile::fake()->create('document.pdf', 10, 'application/pdf'),
 ]);
 

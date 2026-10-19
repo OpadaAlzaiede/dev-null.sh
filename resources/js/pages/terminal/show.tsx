@@ -5,7 +5,7 @@ import AppLayout from '@/layouts/app-layout';
 import SettingsLayout from '@/layouts/settings/layout';
 
 const workflow = [
-    'name: devnull',
+    'name: /dev/null',
     '',
     'on:',
     '  release:',
@@ -26,7 +26,7 @@ const workflow = [
 ].join('\n');
 
 const inputs = [
-    { name: 'body', description: 'The commit, 3 to 280 characters.' },
+    { name: 'body', description: 'The commit, 3 to 4,000 characters.' },
     {
         name: 'ssh-key',
         description:
@@ -35,6 +35,11 @@ const inputs = [
     {
         name: 'reply-to',
         description: 'Optional. The hash or link of a commit to reply to.',
+    },
+    {
+        name: 'images',
+        description:
+            'Optional. Paths of JPEG, PNG or WebP files to attach, one per line, up to 3.',
     },
 ];
 
@@ -46,7 +51,7 @@ export default function Show({ url }: { url: string }) {
             <section className="px-4 py-6 sm:px-6">
                 <Heading
                     title="Commit from your terminal"
-                    description="No login, no token: the script signs your commit with an SSH key that is on your GitHub account, and devnull checks it against the keys GitHub publishes for you."
+                    description="No login, no token: the script signs your commit with an SSH key that is on your GitHub account, and /dev/null checks it against the keys GitHub publishes for you."
                 />
 
                 <div className="space-y-3">
@@ -57,6 +62,10 @@ export default function Show({ url }: { url: string }) {
                     <CopyableCode
                         label="reply command"
                         code={`curl -fsSL ${url}/commit | bash -s -- --reply 0be0130 'Agreed!'`}
+                    />
+                    <CopyableCode
+                        label="image command"
+                        code={`curl -fsSL ${url}/commit | bash -s -- --image shipped.png 'Shipped!'`}
                     />
                 </div>
             </section>
@@ -94,7 +103,7 @@ export default function Show({ url }: { url: string }) {
                             >
                                 signing key
                             </a>
-                            . It can sign devnull commits, but never push code
+                            . It can sign /dev/null commits, but never push code
                             or log in.
                         </p>
                     </li>
@@ -145,8 +154,8 @@ export default function Show({ url }: { url: string }) {
 
                 <p className="mt-4 max-w-prose text-sm text-pretty text-muted-foreground">
                     The job prints the link to your commit, and whether it is
-                    pending review. When devnull refuses it, the job fails with
-                    the reason.
+                    pending review. When /dev/null refuses it, the job fails
+                    with the reason.
                 </p>
             </section>
         </>

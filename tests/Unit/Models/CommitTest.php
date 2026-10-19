@@ -24,13 +24,14 @@ test('to array', function (): void {
             'parent_id',
             'deleted_at',
             'link_preview_id',
-            'series_id',
-            'series_position',
-            'series_size',
             'quoted_commit_id',
+            'mentions',
             'root_id',
             'hot_score',
+            'pasteis_count',
             'body_segments',
+            'preview_segments',
+            'is_checking',
         ]);
 });
 
@@ -41,6 +42,18 @@ it('splits its body into segments', function (): void {
         ['type' => 'text', 'text' => 'run '],
         ['type' => 'code', 'code' => 'make'],
     ]);
+});
+
+it('splits the excerpt of a body too long to show whole in a list into segments too', function (): void {
+    $short = Commit::factory()->create(['body' => 'run `make`']);
+    $long = Commit::factory()->create(['body' => 'run `make` '.str_repeat('again ', 60)]);
+
+    expect($short->toArray()['preview_segments'])->toBeNull()
+        ->and($long->toArray()['preview_segments'])->toBe([
+            ['type' => 'text', 'text' => 'run '],
+            ['type' => 'code', 'code' => 'make'],
+            ['type' => 'text', 'text' => ' '.mb_rtrim(str_repeat('again ', 45)).'…'],
+        ]);
 });
 
 it('belongs to a user', function (): void {
@@ -68,15 +81,6 @@ it('is visible when approved or owned', function (): void {
         ->and($pending->isVisibleTo($viewer))->toBeFalse()
         ->and($rejected->isVisibleTo($author))->toBeTrue()
         ->and($rejected->isVisibleTo($viewer))->toBeFalse();
-});
-
-it('continues a series from its second part on', function (): void {
-    $parts = commitSeries();
-
-    expect(Commit::factory()->create()->isSeriesContinuation())->toBeFalse()
-        ->and($parts[0]->isSeriesContinuation())->toBeFalse()
-        ->and($parts[1]->isSeriesContinuation())->toBeTrue()
-        ->and($parts[2]->isSeriesContinuation())->toBeTrue();
 });
 
 it('deletes stars with the commit', function (): void {
@@ -189,8 +193,8 @@ it('serializes a deleted commit as a tombstone without its author or body', func
     ]);
 });
 
-it('counts visible replies and quotes without series continuations in public previews', function (): void {
-    $parts = commitSeries();
+it('counts visible replies and quotes in public previews', function (): void {
+    $parts = [Commit::factory()->create()];
     Commit::factory()->for($parts[0], 'parent')->create();
     Commit::factory()->for($parts[0], 'parent')->pending()->create();
     Commit::factory()->for($parts[0], 'quotedCommit')->create();
@@ -208,6 +212,43 @@ it('counts visible replies and quotes without series continuations in public pre
         ->and($preview->isDirty('body'))->toBeTrue();
 });
 
+it('counts only approved quotes in its public preview', function (): void {
+    $commit = Commit::factory()->create();
+    Commit::factory()->for($commit, 'quotedCommit')->create();
+    Commit::factory()->for($commit, 'quotedCommit')->pending()->create();
+
+    $preview = $commit->loadPublicPreview();
+
+    expect($preview->replies_count)->toBe(1)
+        ->and($preview->isDirty('replies_count'))->toBeFalse();
+});
+
+it('loads a public preview for an unsaved commit without making it persistent', function (): void {
+    $user = User::factory()->create();
+    $commit = Commit::factory()->for($user)->make();
+
+    $preview = $commit->loadPublicPreview();
+
+    expect($preview)->toBe($commit)
+        ->and($preview->exists)->toBeFalse()
+        ->and($preview->replies_count)->toBe(0)
+        ->and($preview->isDirty('replies_count'))->toBeFalse()
+        ->and($preview->user->is($user))->toBeTrue();
+});
+
+it('loads public preview counts onto a partially selected commit with its id', function (): void {
+    $commit = Commit::factory()->create();
+    Commit::factory()->for($commit, 'parent')->create();
+    Commit::factory()->for($commit, 'quotedCommit')->create();
+    $partial = Commit::query()->select(['id', 'user_id', 'parent_id'])->findOrFail($commit->id);
+
+    $partial->loadPublicPreview();
+
+    expect($partial->replies_count)->toBe(2)
+        ->and($partial->isDirty('replies_count'))->toBeFalse()
+        ->and($partial->getAttributes())->not->toHaveKey('body');
+});
+
 it('loads an unsaved public preview without dirtying its computed count', function (): void {
     $commit = Commit::factory()->make();
 
@@ -217,6 +258,37 @@ it('loads an unsaved public preview without dirtying its computed count', functi
         ->and($preview->isDirty('replies_count'))->toBeFalse()
         ->and($preview->exists)->toBeFalse();
 });
+
+it('counts public replies and quotes in a deleted commit preview without dirtying its count', function (): void {
+    $commit = Commit::factory()->create();
+    Commit::factory()->for($commit, 'parent')->create();
+    Commit::factory()->for($commit, 'quotedCommit')->create();
+    Commit::factory()->for($commit, 'parent')->pending()->create();
+    Commit::factory()->for($commit, 'quotedCommit')->pending()->create();
+    $commit->delete();
+
+    $preview = $commit->loadPublicPreview();
+
+    expect($preview->replies_count)->toBe(2)
+        ->and($preview->isDirty('replies_count'))->toBeFalse();
+});
+
+it('loads a public preview without a persisted primary key', function (bool $partial): void {
+    $author = User::factory()->create();
+    $commit = $partial
+        ? Commit::query()->select(['user_id', 'parent_id'])->findOrFail(Commit::factory()->for($author)->create()->id)
+        : Commit::factory()->for($author)->make(['id' => fake()->uuid()]);
+
+    $preview = $commit->loadPublicPreview();
+
+    expect($preview)->toBe($commit)
+        ->and($preview->replies_count)->toBe(0)
+        ->and($preview->isDirty('replies_count'))->toBeFalse()
+        ->and($preview->user?->is($author))->toBeTrue();
+})->with([
+    'unsaved commit' => false,
+    'partial commit without its primary key' => true,
+]);
 
 it('hydrates public preview counts without persisting them or clearing body edits', function (bool $deleted): void {
     $parent = Commit::factory()->create();

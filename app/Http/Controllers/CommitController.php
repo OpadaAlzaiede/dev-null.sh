@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 
 use App\Actions\CreateCommit;
 use App\Actions\DeleteCommit;
+use App\Dto\ThreadContinuation;
 use App\Enums\CommitStatus;
 use App\Http\Requests\CreateCommitRequest;
 use App\Http\Requests\DeleteCommitRequest;
@@ -13,11 +14,13 @@ use App\Http\Requests\ShowCommitRequest;
 use App\Models\Commit;
 use App\Models\User;
 use App\Queries\CommitAncestorsQuery;
+use App\Queries\CommitContinuationQuery;
 use App\Queries\CommitRepliesQuery;
-use App\Queries\CommitSeriesQuery;
 use App\Services\PageMetadata;
 use Illuminate\Container\Attributes\CurrentUser;
+use Illuminate\Contracts\Pagination\CursorPaginator;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -27,28 +30,37 @@ final readonly class CommitController
     /**
      * Commits are public, so guests and crawlers read the same page, with the commit's link preview and the replies shown under it as structured data.
      */
-    public function show(ShowCommitRequest $request, #[CurrentUser] ?User $currentUser, User $user, Commit $commit, CommitAncestorsQuery $ancestors, CommitRepliesQuery $replies, CommitSeriesQuery $series, PageMetadata $metadata): Response
+    public function show(ShowCommitRequest $request, #[CurrentUser] ?User $currentUser, User $user, Commit $commit, CommitAncestorsQuery $ancestors, CommitContinuationQuery $continuation, CommitRepliesQuery $replies, PageMetadata $metadata): Response
     {
-        $isInSeries = $commit->series_id !== null;
+        $focusedCommit = null;
+        $getCommit = function () use (&$focusedCommit, $commit, $currentUser): Commit {
+            return $focusedCommit ??= Commit::query()
+                ->withVisibleReplyCount($currentUser)
+                ->withContinuationId($currentUser)
+                ->withCardDataFor($currentUser)
+                ->findOrFail($commit->id);
+        };
 
-        // A series reads in order, so the replies to a part stay folded until asked for...
-        $threadReplies = $isInSeries ? null : $replies->paginate($commit, $currentUser);
+        $threadContinuation = null;
+        $getContinuation = function () use (&$threadContinuation, $continuation, $getCommit, $currentUser): ThreadContinuation {
+            return $threadContinuation ??= $continuation->get($getCommit(), $currentUser);
+        };
 
-        $preview = $currentUser instanceof User ? null : $metadata->commit(
+        $threadReplies = null;
+        $getReplies = function () use (&$threadReplies, $replies, $commit, $currentUser): CursorPaginator {
+            return $threadReplies ??= $replies->paginate($commit, $currentUser);
+        };
+
+        $preview = $currentUser instanceof User || $request->inertia() ? null : $metadata->commit(
             $commit->loadPublicPreview()->loadCount('stars')->load(['images', 'linkPreview', 'quotedCommit.user']),
-            $threadReplies?->items() ?? [],
+            $getReplies()->items(),
         );
 
-        $commit = Commit::query()
-            ->withVisibleReplyCount($currentUser)
-            ->withCardDataFor($currentUser)
-            ->findOrFail($commit->id);
-
         return Inertia::render('commit/show', [
-            'commit' => $commit,
-            'ancestors' => $isInSeries ? $series->before($commit, $currentUser) : $ancestors->get($commit, $currentUser),
-            'series' => $series->after($commit, $currentUser),
-            'replies' => $threadReplies,
+            'commit' => $getCommit,
+            'ancestors' => fn (): Collection => $ancestors->get($commit, $currentUser),
+            'continuation' => $getContinuation,
+            'replies' => fn (): ?CursorPaginator => $getContinuation()->commits->isEmpty() ? $getReplies() : null,
         ])->withViewData(['preview' => $preview]);
     }
 
@@ -64,7 +76,7 @@ final readonly class CommitController
         if ($commit->status === CommitStatus::Pending) {
             Inertia::flash('toast', [
                 'type' => 'info',
-                'message' => __('Your commit is pending review. Everyone will see it once it is approved.'),
+                'message' => 'Your commit is pending review. Everyone will see it once it is approved.',
             ]);
         }
 

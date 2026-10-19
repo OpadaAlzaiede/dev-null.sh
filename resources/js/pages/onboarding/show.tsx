@@ -23,7 +23,7 @@ import { useClipboard } from '@/hooks/use-clipboard';
 import { useUser } from '@/hooks/use-user';
 import { useKeyLabels } from '@/lib/keyboard';
 import { cn, laneColor } from '@/lib/utils';
-import type { SuggestedUser } from '@/types';
+import type { Lane, SuggestedUser } from '@/types';
 
 const laneNames = ['orange', 'green', 'violet', 'teal', 'rose', 'ochre'];
 
@@ -216,7 +216,7 @@ export default function Show({
     suggestions,
     commitScriptUrl,
 }: {
-    preferredLane: number | null;
+    preferredLane: Lane | null;
     automaticLane: number;
     suggestions: SuggestedUser[];
     commitScriptUrl: string;
@@ -224,7 +224,7 @@ export default function Show({
     const { auth } = usePage().props;
     const { user: currentUser } = useUser();
     const [step, setStep] = useRemember(0, 'onboarding-step');
-    const [selectedLane, setSelectedLane] = useState<number | null>(
+    const [selectedLane, setSelectedLane] = useState<Lane | null>(
         preferredLane,
     );
     const [isShowingShortcuts, setIsShowingShortcuts] = useState(false);
@@ -266,7 +266,12 @@ export default function Show({
         return () => window.removeEventListener('keydown', onKeyDown);
     }, []);
 
-    const laneName = selectedLane === null ? 'auto' : laneNames[selectedLane];
+    const laneName =
+        selectedLane === null
+            ? 'auto'
+            : typeof selectedLane === 'string'
+              ? selectedLane
+              : laneNames[selectedLane];
 
     const steps = [
         {
@@ -276,7 +281,7 @@ export default function Show({
                 <StepContent
                     headingRef={headingRef}
                     title="This is you, according to GitHub."
-                    description="devnull copies your GitHub profile every time you sign in, so there's nothing to fill in. To change any of it, change it on GitHub."
+                    description="/dev/null copies your GitHub profile every time you sign in, so there's nothing to fill in. To change any of it, change it on GitHub."
                     actions={
                         <>
                             <Button onClick={next}>Looks right</Button>
@@ -341,7 +346,7 @@ export default function Show({
                                 />
                             </div>
                             <InputError
-                                message={errors.lane}
+                                message={errors.lane ?? errors.color}
                                 className="mt-2"
                             />
                         </StepContent>
@@ -409,9 +414,10 @@ export default function Show({
                             <dt className="font-semibold">Write a commit</dt>
                             <dd className="mt-1 text-pretty text-muted-foreground">
                                 The composer sits at the top of your log. Plain
-                                text, up to 280 characters. Press <Kbd>c</Kbd>{' '}
-                                to jump to it, then <Kbd>{keys.mod}</Kbd>{' '}
-                                <Kbd>↵</Kbd> to commit.
+                                text, up to 4,000 characters; feeds fold long
+                                ones after 280. Press <Kbd>c</Kbd> to jump to
+                                it, then <Kbd>{keys.mod}</Kbd> <Kbd>↵</Kbd> to
+                                commit.
                             </dd>
                         </div>
                         <div className="px-4 py-4">

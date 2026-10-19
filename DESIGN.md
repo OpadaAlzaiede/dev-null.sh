@@ -1,5 +1,5 @@
 ---
-name: devnull
+name: /dev/null
 description: A social network for developers, drawn as a git log.
 colors:
   shell: "#f6f7f8"
@@ -162,7 +162,7 @@ components:
     size: "40px"
 ---
 
-# Design System: devnull
+# Design System: /dev/null
 
 ## Overview
 
@@ -232,7 +232,7 @@ A cool, nearly colorless shell with one working blue and six author lanes reserv
 ### Named Rules
 **The Machine Speaks Mono Rule.** If git or a shell would print it (a hash, a handle, a count, a timestamp, an error line, `null`), it is set in Geist Mono at 13px with tabular figures. Human sentences never are.
 
-**The Lowercase Wordmark Rule.** "devnull" is always lowercase, set in the sans beside the null-sign mark, bold with tight negative tracking.
+**The Lowercase Wordmark Rule.** "/dev/null" is always lowercase and keeps both slashes, set in the sans beside the null-sign mark, bold with tight negative tracking. In the wordmark, the second slash is drawn as an outline in `--lane-0`.
 
 ## Layout
 
@@ -270,7 +270,7 @@ Quiet, rectangular, decisive.
 - **Vocabulary:** a post is a **commit** and a timeline is a **log**, in the UI and in code. **Star** is the engagement verb. No other git nouns.
 
 ### Inputs / Fields
-- **Composer:** borderless, no visible field chrome: a 17px textarea ("What did you ship?", max 280) that grows with content. Its state is carried by the graph: the staged node is hollow until the body reaches 3 characters, then fills with the author's lane; the tail below it is a dashed Rail Gray line. A mono countdown sits left of the "Commit" button; ⌘/Ctrl+Enter commits.
+- **Composer:** borderless, no visible field chrome: a 17px textarea ("What did you ship?", max 4,000) that grows with content. Its state is carried by the graph: the staged node is hollow until the body reaches 3 characters, then fills with the author's lane; the tail below it is a dashed Rail Gray line. A mono countdown sits left of the "Commit" button; ⌘/Ctrl+Enter commits.
 - **Preview:** an eye icon button after the image picker (Blue Wash with Commit Blue icon while pressed) swaps the textarea for the draft rendered as the posted commit at 15px, in the same spot and never shorter than the textarea, so the counter row stays put. Attached images show as the posted grid, and the URL that will unfurl sits in a dashed hairline box with a mono URL and "Unfurls into a link card after you commit." ⌘/Ctrl+Shift+P toggles it; Esc returns to writing; ⌘/Ctrl+Enter still commits.
 - **Stash:** unsent text in the composer and in each reply composer is kept in `localStorage` per signed-in user (cleared on commit, when emptied, and on log out). When a draft comes back after a reload or navigation, a quiet mono `stash@{0}` (title "Restored your unsent draft") sits at the left of the counter row with a muted `drop` text button that discards it. Merely typing never shows it. A thread with a stashed reply prints a muted 11px mono `stash@{0}` after its "Reply" action; Cancel and Escape close the reply composer but keep the stash. Neither element is blue.
 - **Read-only fields (settings):** a hairline-bordered 8px-radius list, mono keys in a 6.5rem column, values in sans; missing values print a mono `null`.

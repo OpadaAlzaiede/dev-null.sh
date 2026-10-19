@@ -6,9 +6,11 @@ import {
     Heart,
     Link2,
     MapPin,
+    MessagesSquare,
 } from 'lucide-react';
 import type { CSSProperties } from 'react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import ConversationController from '@/actions/App/Http/Controllers/ConversationController';
 import { show } from '@/actions/App/Http/Controllers/UserController';
 import UserFollowersController from '@/actions/App/Http/Controllers/UserFollowersController';
 import UserFollowingController from '@/actions/App/Http/Controllers/UserFollowingController';
@@ -21,10 +23,13 @@ import { FollowButton } from '@/components/follow-button';
 import { GitHubIcon } from '@/components/github-icon';
 import { PageTabs } from '@/components/page-tabs';
 import { PinCommitButton } from '@/components/pin-commit-button';
+import { ProfileShareButton } from '@/components/profile-share-button';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from '@/components/user-avatar';
 import { UserSafetyMenu } from '@/components/user-safety-menu';
+import { refreshSharedState, useSharedState } from '@/hooks/use-shared-state';
 import AppLayout from '@/layouts/app-layout';
+import { commitStateKey } from '@/lib/commit-state';
 import { laneColor } from '@/lib/utils';
 import type {
     Achievements,
@@ -41,9 +46,11 @@ function pluralize(count: number, singular: string, plural: string) {
 
 export default function Show({
     user,
+    pasteisReceived,
     isFollowing,
     followsYou,
     isMuting,
+    canPush,
     activity,
     streaks,
     achievements,
@@ -52,9 +59,11 @@ export default function Show({
     pinnedCommit,
 }: {
     user: Profile;
+    pasteisReceived: number | null;
     isFollowing: boolean;
     followsYou: boolean;
     isMuting: boolean;
+    canPush: boolean;
     activity: Activity;
     streaks: Streaks;
     achievements: Achievements;
@@ -69,6 +78,23 @@ export default function Show({
         null,
     );
     const [isAchievementsOpen, setIsAchievementsOpen] = useState(false);
+    const [pasteisCount] = useSharedState(
+        commitStateKey('pasteis_received', user.id),
+        pasteisReceived ?? 0,
+    );
+
+    useEffect(() => {
+        if (pasteisReceived !== null) {
+            refreshSharedState(
+                new Map([
+                    [
+                        commitStateKey('pasteis_received', user.id),
+                        pasteisReceived,
+                    ],
+                ]),
+            );
+        }
+    }, [user.id, pasteisReceived]);
 
     return (
         <>
@@ -87,37 +113,64 @@ export default function Show({
                     <UserAvatar
                         user={user}
                         className="size-20 text-2xl ring-2 ring-(--lane) ring-offset-4 ring-offset-card"
+                        pixels={160}
                         style={{ '--lane': lane } as CSSProperties}
                     />
 
-                    {isCurrentUser ? (
-                        <Button variant="outline" asChild>
-                            <a
-                                href="https://github.com/settings/profile"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                            >
-                                Edit on GitHub
-                                <ArrowUpRight />
-                            </a>
-                        </Button>
-                    ) : (
-                        <div className="flex gap-2">
-                            {auth.user && (
-                                <UserSafetyMenu
+                    <div className="flex shrink-0 gap-1.5 sm:gap-2">
+                        <ProfileShareButton
+                            username={user.username}
+                            href={show(user).url}
+                        />
+                        {isCurrentUser ? (
+                            <Button variant="outline" asChild>
+                                <a
+                                    href="https://github.com/settings/profile"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                >
+                                    Edit on GitHub
+                                    <ArrowUpRight />
+                                </a>
+                            </Button>
+                        ) : (
+                            <>
+                                {auth.user && (
+                                    <UserSafetyMenu
+                                        user={user}
+                                        isMuting={isMuting}
+                                        isBlocking={false}
+                                    />
+                                )}
+                                {canPush && (
+                                    <Button
+                                        variant="outline"
+                                        className="sm:min-w-24"
+                                        asChild
+                                    >
+                                        <Link
+                                            href={ConversationController.show(
+                                                user,
+                                            )}
+                                            aria-label={`Remote @${user.username}`}
+                                            data-test="profile-remote"
+                                        >
+                                            <MessagesSquare />
+                                            <span className="hidden sm:inline">
+                                                Remote
+                                            </span>
+                                        </Link>
+                                    </Button>
+                                )}
+                                <FollowButton
                                     user={user}
-                                    isMuting={isMuting}
-                                    isBlocking={false}
+                                    isFollowing={isFollowing}
+                                    className="min-w-28"
+                                    onSuccess={() => router.flushAll()}
                                 />
-                            )}
-                            <FollowButton
-                                user={user}
-                                isFollowing={isFollowing}
-                                className="min-w-28"
-                                onSuccess={() => router.flushAll()}
-                            />
-                        </div>
-                    )}
+                            </>
+                        )}
+                    </div>
                 </div>
 
                 <h1 className="mt-4 text-2xl font-semibold tracking-tight text-balance">
@@ -191,17 +244,19 @@ export default function Show({
                             </a>
                         </li>
                     )}
-                    <li className="flex items-center gap-1.5">
-                        <GitHubIcon className="size-4" />
-                        <a
-                            href={`https://github.com/${user.username}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-primary hover:underline"
-                        >
-                            github.com/{user.username}
-                        </a>
-                    </li>
+                    {user.has_github_account && (
+                        <li className="flex items-center gap-1.5">
+                            <GitHubIcon className="size-4" />
+                            <a
+                                href={`https://github.com/${user.username}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-primary hover:underline"
+                            >
+                                github.com/{user.username}
+                            </a>
+                        </li>
+                    )}
                     {user.has_sponsors_listing && (
                         <li className="flex items-center gap-1.5">
                             <Heart className="size-4" />
@@ -274,6 +329,24 @@ export default function Show({
                         </div>
                     ))}
                 </dl>
+                {auth.pasteis && pasteisReceived !== null && (
+                    <p
+                        className="mt-3 flex items-center gap-1.5 text-sm text-muted-foreground"
+                        data-test="profile-pasteis-count"
+                    >
+                        <img
+                            src="/pastel-de-nata.svg"
+                            alt=""
+                            width={20}
+                            height={20}
+                            className="size-5 shrink-0 object-contain"
+                        />
+                        <span className="font-mono font-medium text-foreground tabular-nums">
+                            {pasteisCount}
+                        </span>
+                        {pluralize(pasteisCount, 'pastel', 'pastéis')} received
+                    </p>
+                )}
             </header>
 
             <ActivityGraph
@@ -301,6 +374,8 @@ export default function Show({
             <PageTabs
                 label="Profile feed"
                 preserveScroll
+                only={['tab', 'commits', 'pinnedCommit']}
+                reset={['commits']}
                 tabs={[
                     {
                         title: 'Commits',

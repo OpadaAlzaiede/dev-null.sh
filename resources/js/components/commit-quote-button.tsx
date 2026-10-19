@@ -3,7 +3,10 @@ import { Quote } from 'lucide-react';
 import type { KeyboardEvent } from 'react';
 import { useRef, useState } from 'react';
 import CommitController from '@/actions/App/Http/Controllers/CommitController';
+import { ActionTooltip } from '@/components/action-tooltip';
+import { BodyCounter } from '@/components/body-counter';
 import {
+    ImageDropOverlay,
     ImagePickerButton,
     ImagePickerPreviews,
     imageErrorFrom,
@@ -26,12 +29,10 @@ import { useSecretWarning } from '@/hooks/use-secret-warning';
 import { moveCaretToEnd, useHasStash, useStash } from '@/hooks/use-stash';
 import { useUser } from '@/hooks/use-user';
 import { signIn } from '@/lib/auth';
+import { maxBodyLength, minBodyLength } from '@/lib/commit';
 import { hasModKey, useKeyLabels } from '@/lib/keyboard';
-import { characterCount, cn } from '@/lib/utils';
+import { characterCount, cn, isRejectedSubmission } from '@/lib/utils';
 import type { Commit } from '@/types';
-
-const minBodyLength = 3;
-const maxBodyLength = 280;
 
 export function CommitQuoteButton({
     commit,
@@ -52,37 +53,38 @@ export function CommitQuoteButton({
 
     return (
         <>
-            <button
-                type="button"
-                onClick={() => {
-                    if (auth.user === null) {
-                        signIn();
+            <ActionTooltip label="Quote" shortcut={keyShortcut}>
+                <button
+                    type="button"
+                    onClick={() => {
+                        if (auth.user === null) {
+                            signIn();
 
-                        return;
-                    }
+                            return;
+                        }
 
-                    setIsOpen(true);
-                }}
-                aria-haspopup="dialog"
-                aria-keyshortcuts={keyShortcut}
-                title={keyShortcut ? `Quote (${keyShortcut})` : 'Quote'}
-                className={cn(
-                    'flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
-                    className,
-                )}
-                data-test="quote-button"
-            >
-                <Quote className="size-4" />
-                <span className="sr-only sm:not-sr-only">Quote</span>
-                {hasStash && (
-                    <span
-                        title="You have an unsent quote here"
-                        className="font-mono text-[11px] opacity-70"
-                    >
-                        {'stash@{0}'}
-                    </span>
-                )}
-            </button>
+                        setIsOpen(true);
+                    }}
+                    aria-haspopup="dialog"
+                    aria-keyshortcuts={keyShortcut}
+                    className={cn(
+                        'flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
+                        className,
+                    )}
+                    data-test="quote-button"
+                >
+                    <Quote className="size-4" />
+                    <span className="sr-only sm:not-sr-only">Quote</span>
+                    {hasStash && (
+                        <span
+                            title="You have an unsent quote here"
+                            className="font-mono text-[11px] opacity-70"
+                        >
+                            {'stash@{0}'}
+                        </span>
+                    )}
+                </button>
+            </ActionTooltip>
 
             <Dialog open={isOpen} onOpenChange={setIsOpen}>
                 {isOpen && (
@@ -105,14 +107,22 @@ function QuoteComposer({
 }) {
     const { user } = useUser();
     const id = `quote-${commit.id}`;
-    const { body, isRestored, updateBody, drop } = useStash(user.id, id);
-    const attachments = useImageAttachments();
+    const {
+        body,
+        images,
+        descriptions,
+        isRestored,
+        updateBody,
+        updateImages,
+        drop,
+    } = useStash(user.id, id);
+    const attachments = useImageAttachments(images, descriptions, updateImages);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const secrets = useSecretWarning(body);
     const keys = useKeyLabels();
 
-    const remaining = maxBodyLength - characterCount(body);
-    const isQuotable = characterCount(body.trim()) >= minBodyLength;
+    const isQuotable =
+        images.length > 0 || characterCount(body.trim()) >= minBodyLength;
 
     const submitOnModEnter = (event: KeyboardEvent<HTMLTextAreaElement>) => {
         if (event.key === 'Enter' && hasModKey(event) && isQuotable) {
@@ -136,9 +146,13 @@ function QuoteComposer({
                     event.preventDefault();
                 }
             }}
+            {...attachments.dropzone}
             className="gap-3 p-4 sm:max-w-xl sm:p-5"
             data-test="quote-composer"
         >
+            {attachments.isDraggingFiles && (
+                <ImageDropOverlay className="fixed" />
+            )}
             <DialogTitle className="text-base">
                 Quote @{commit.user.username}
             </DialogTitle>
@@ -151,19 +165,19 @@ function QuoteComposer({
                 errorBag="quote"
                 onBefore={secrets.beforeSubmit}
                 transform={(data) =>
-                    attachments.images.length > 0
+                    images.length > 0
                         ? {
                               ...data,
-                              images: attachments.images,
-                              image_descriptions: attachments.descriptions,
+                              images,
+                              image_descriptions: descriptions,
                           }
                         : data
                 }
                 options={{ preserveScroll: true }}
                 onSuccess={(page) => {
-                    if (page.flash.committed) {
-                        drop();
+                    if (!isRejectedSubmission(page.flash)) {
                         attachments.clear();
+                        drop();
                         onClose();
                     }
                 }}
@@ -195,8 +209,6 @@ function QuoteComposer({
                                 onValueChange={updateBody}
                                 onKeyDown={submitOnModEnter}
                                 onPaste={attachments.onPaste}
-                                onDragOver={attachments.onDragOver}
-                                onDrop={attachments.onDrop}
                                 onFocus={
                                     isRestored ? moveCaretToEnd : undefined
                                 }
@@ -209,7 +221,7 @@ function QuoteComposer({
                                         : undefined
                                 }
                                 aria-describedby={`${id}-count`}
-                                className="block field-sizing-content min-h-10 w-full resize-none bg-transparent py-1.5 text-[17px] leading-relaxed outline-none placeholder:text-muted-foreground focus-visible:outline-none"
+                                className="block field-sizing-content max-h-[40dvh] min-h-10 w-full resize-none overflow-x-hidden overflow-y-auto bg-transparent py-1.5 text-[17px] leading-relaxed outline-none placeholder:text-muted-foreground focus-visible:outline-none"
                             />
 
                             <InputError
@@ -227,8 +239,8 @@ function QuoteComposer({
                             />
 
                             <ImagePickerPreviews
-                                images={attachments.images}
-                                descriptions={attachments.descriptions}
+                                images={images}
+                                descriptions={descriptions}
                                 onDescribe={attachments.describe}
                                 onRemove={attachments.remove}
                             />
@@ -241,10 +253,10 @@ function QuoteComposer({
 
                             <QuotedCommit commit={commit} isPreview />
 
-                            <div className="mt-3 flex items-center justify-end gap-3">
+                            <div className="sticky -bottom-4 -mb-4 flex items-center justify-end gap-3 bg-background pt-3 pb-4 sm:-bottom-5 sm:-mb-5 sm:pb-5">
                                 <div className="mr-auto flex items-center gap-2">
                                     <ImagePickerButton
-                                        count={attachments.images.length}
+                                        count={images.length}
                                         disabled={processing}
                                         onPick={attachments.attach}
                                         className="size-8"
@@ -252,6 +264,7 @@ function QuoteComposer({
                                     {isRestored && (
                                         <StashLabel
                                             onDrop={() => {
+                                                attachments.clear();
                                                 drop();
                                                 document
                                                     .getElementById(id)
@@ -261,20 +274,11 @@ function QuoteComposer({
                                         />
                                     )}
                                 </div>
-                                <span
+                                <BodyCounter
                                     id={`${id}-count`}
-                                    aria-label={`${remaining} characters left`}
-                                    className={cn(
-                                        'font-mono text-[13px] text-muted-foreground',
-                                        {
-                                            'text-amber-700 dark:text-amber-400':
-                                                remaining <= 20,
-                                            'text-destructive': remaining === 0,
-                                        },
-                                    )}
-                                >
-                                    {remaining}
-                                </span>
+                                    body={body}
+                                    className="text-[13px]"
+                                />
                                 <Button
                                     type="button"
                                     variant="ghost"

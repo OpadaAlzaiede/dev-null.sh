@@ -2,14 +2,13 @@
 
 declare(strict_types=1);
 
-use App\Actions\CreateCommitSeries;
 use App\Dto\SshPublicKey;
-use App\Enums\CommitStatus;
 use App\Jobs\UnfurlLink;
-use App\Models\Commit;
+use App\Models\Message;
 use App\Models\User;
+use App\Services\OpenAI;
+use App\Services\SignedCommits;
 use Carbon\CarbonInterface;
-use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -32,6 +31,11 @@ pest()->extend(TestCase::class)
     })
     ->in('Feature', 'Unit');
 
+pest()->tia()
+    ->locally()
+    ->baselined()
+    ->defaultBranch('production');
+
 expect()->extend('toBeOne', fn () => $this->toBe(1));
 
 function something(): void
@@ -42,6 +46,67 @@ function something(): void
 function sshFixture(string $name): string
 {
     return (string) file_get_contents(__DIR__.'/Fixtures/ssh/'.$name);
+}
+
+/**
+ * A unit vector in one dimension and zero elsewhere, so two of them differ only in direction and their cosine
+ * distance is exact: 0 for the same dimension, 1 for any other.
+ *
+ * @return list<float>
+ */
+function embeddingVector(int $dimension): array
+{
+    $vector = array_fill(0, OpenAI::EMBEDDING_DIMENSIONS, 0.0);
+    $vector[$dimension] = 1.0;
+
+    return $vector;
+}
+
+/**
+ * @param  list<list<float>>  $embeddings
+ * @return array{data: list<array{index: int, embedding: list<float>}>}
+ */
+function embeddingsResponse(array $embeddings): array
+{
+    return ['data' => array_map(
+        fn (array $embedding, int $index): array => ['index' => $index, 'embedding' => $embedding],
+        $embeddings,
+        array_keys($embeddings),
+    )];
+}
+
+/**
+ * The decision model's answers: one predicate per candidate, in the order given, at even odds or better when the
+ * verdict is that it is relevant. An empty list leaves every candidate unjudged, and so kept.
+ *
+ * @param  list<bool>  $verdicts
+ * @return array{answers: list<array{type: string, name: string, probability: float}>}
+ */
+function relevanceResponse(array $verdicts): array
+{
+    return ['answers' => array_map(
+        fn (bool $relevant, int $index): array => [
+            'type' => 'predicate',
+            'name' => 'post_'.($index + 1),
+            'probability' => $relevant ? 1.0 : 0.0,
+        ],
+        $verdicts,
+        array_keys($verdicts),
+    )];
+}
+
+/**
+ * The two requests a commit search makes: embedding the term, and the decision model's verdicts on the candidates. By
+ * default every candidate is relevant, so only the filtering tests pass verdicts.
+ *
+ * @param  list<bool>  $verdicts
+ */
+function fakeSearch(array $verdicts = []): void
+{
+    Http::fake([
+        'api.openai.com/v1/embeddings' => Http::response(embeddingsResponse([embeddingVector(0)])),
+        'api.openai.com/v1/decisions' => Http::response(relevanceResponse($verdicts)),
+    ]);
 }
 
 /**
@@ -115,18 +180,28 @@ function fakeGitHubSponsorsListing(bool $hasSponsorsListing = false): void
 }
 
 /**
+ * @param  list<string>  $imageHashes
  * @return array{payload: string, signature: string}
  */
-function signedCommit(SshKeyPair $keyPair, string $body, ?int $timestamp = null, ?string $nonce = null, string $replyTo = ''): array
+function signedCommit(SshKeyPair $keyPair, string $body, ?int $timestamp = null, ?string $nonce = null, string $replyTo = '', array $imageHashes = []): array
 {
-    $payload = implode("\n", [
+    $lines = [
         $timestamp ?? now()->getTimestamp(),
         $nonce ?? bin2hex(random_bytes(16)),
         $replyTo,
-        $body,
-    ]);
+    ];
 
-    return ['payload' => $payload, 'signature' => $keyPair->sign($payload)];
+    if ($imageHashes !== []) {
+        $lines[] = implode(',', $imageHashes);
+    }
+
+    $lines[] = $body;
+
+    $payload = implode("\n", $lines);
+
+    $namespace = $imageHashes === [] ? SignedCommits::Namespace : SignedCommits::ImagesNamespace;
+
+    return ['payload' => $payload, 'signature' => $keyPair->sign($payload, $namespace)];
 }
 
 function fakeAvatar(): string
@@ -171,16 +246,47 @@ function queuedJob(string $queue, CarbonInterface $createdAt): void
 }
 
 /**
- * @return Collection<int, Commit>
+ * Sends a chat message the way the composer does, so tests start from real conversations.
  */
-function commitSeries(?User $user = null, int $size = 3, CommitStatus $status = CommitStatus::Approved): Collection
+function sendChatMessage(User $sender, User $recipient, string $body = 'hello'): Message
 {
-    $parts = resolve(CreateCommitSeries::class)->handle(
-        $user ?? User::factory()->create(),
-        array_map(fn (int $position): string => "Part {$position} of the series", range(1, $size)),
-    );
+    test()->actingAs($sender)->postJson(route('conversation-message.store', $recipient), [
+        'body' => $body,
+        'client_id' => Str::uuid()->toString(),
+    ])->assertCreated();
 
-    Commit::query()->whereKey($parts->modelKeys())->update(['status' => $status]);
+    return Message::query()->latest('id')->firstOrFail();
+}
 
-    return $parts->fresh();
+/**
+ * People who follow the maintainer, so they can be added to an org.
+ *
+ * @return list<User>
+ */
+function followersOf(User $maintainer, int $count): array
+{
+    return User::factory()->count($count)->create()->each(fn (User $follower) => $follower->following()->attach($maintainer))->all();
+}
+
+/**
+ * Creates an org the way the Remotes page does, and returns its id.
+ *
+ * @param  list<User>  $members
+ */
+function createOrg(User $maintainer, array $members, ?string $name = 'dev/null core'): string
+{
+    return test()->actingAs($maintainer)->postJson(route('org.store'), [
+        'name' => $name,
+        'members' => array_map(fn (User $member): string => $member->username, $members),
+    ])->assertCreated()->json('org.id');
+}
+
+function pushToOrg(User $sender, string $org, string $body = 'hello'): Message
+{
+    test()->actingAs($sender)->postJson(route('org-message.store', $org), [
+        'body' => $body,
+        'client_id' => Str::uuid()->toString(),
+    ])->assertCreated();
+
+    return Message::query()->latest('id')->firstOrFail();
 }

@@ -58,6 +58,7 @@ final readonly class CreateWorldReply
             $reply = $world->commits()->create([
                 'body' => "Hello, {$author->name}.",
                 'parent_id' => $commit->id,
+                'root_id' => $commit->threadRootId(),
                 'status' => CommitStatus::Approved,
             ]);
 
@@ -66,14 +67,15 @@ final readonly class CreateWorldReply
     }
 
     /**
-     * A real GitHub account named world keeps the name. The bot never signs in.
+     * A real GitHub account named world keeps the name, even when it signs in after the bot took it and renames the bot
+     * away. The bot never signs in.
      */
     private function world(): ?User
     {
         $world = User::query()->firstWhere('github_id', self::GITHUB_ID);
 
         if ($world instanceof User) {
-            return $world;
+            return $world->username === self::USERNAME ? $world : null;
         }
 
         if (User::query()->where('username', self::USERNAME)->exists()) {

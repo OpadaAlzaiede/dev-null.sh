@@ -58,6 +58,53 @@ it('creates a user and logs them in', function (): void {
     $this->assertAuthenticatedAs($user);
 });
 
+it('refuses a new signup from an account that fails the screening', function (): void {
+    config([
+        'signup.min_account_age_days' => 7,
+        'signup.require_verified_email' => false,
+    ]);
+
+    Socialite::fake('github', GitHubUser::fake([
+        'id' => '583231',
+        'nickname' => 'octocat',
+        'created_at' => now()->subDay()->toIso8601String(),
+    ]));
+
+    $response = $this->get(route('login.store'));
+
+    $response->assertRedirectToRoute('home')
+        ->assertInertiaFlash('toast', [
+            'type' => 'error',
+            'message' => __('Sign up blocked. GitHub accounts younger than :days days cannot join yet.', ['days' => 7]),
+        ]);
+
+    expect(User::query()->where('github_id', '583231')->exists())->toBeFalse();
+
+    $this->assertGuest();
+});
+
+it('does not screen an account that has signed in before', function (): void {
+    fakeGitHubSponsorsListing();
+
+    config([
+        'signup.min_account_age_days' => 7,
+        'signup.require_verified_email' => true,
+    ]);
+
+    $user = User::factory()->create(['github_id' => '583231']);
+
+    Socialite::fake('github', GitHubUser::fake([
+        'id' => '583231',
+        'nickname' => 'octocat',
+        'email' => null,
+        'created_at' => now()->toIso8601String(),
+    ]));
+
+    $this->get(route('login.store'))->assertRedirectToRoute('log.show', Log::Following);
+
+    $this->assertAuthenticatedAs($user);
+});
+
 it('updates an existing user on login', function (): void {
     fakeGitHubSponsorsListing();
 
@@ -174,7 +221,7 @@ it('fails when the user denies access', function (): void {
     $response->assertRedirectToRoute('home')
         ->assertInertiaFlash('toast', [
             'type' => 'error',
-            'message' => __('Unable to sign in with GitHub. Please try again.'),
+            'message' => 'Unable to sign in with GitHub. Please try again.',
         ]);
 
     $this->assertGuest();
@@ -188,7 +235,7 @@ it('fails when the state is invalid', function (): void {
     $response->assertRedirectToRoute('home')
         ->assertInertiaFlash('toast', [
             'type' => 'error',
-            'message' => __('Unable to sign in with GitHub. Please try again.'),
+            'message' => 'Unable to sign in with GitHub. Please try again.',
         ]);
 
     $this->assertGuest();
@@ -213,4 +260,27 @@ it('may destroy a session', function (): void {
     $response->assertRedirectToRoute('home');
 
     $this->assertGuest();
+});
+
+it('makes tom the first friend of a new user, but not of a returning one', function (): void {
+    fakeGitHubSponsorsListing(hasSponsorsListing: false);
+
+    Socialite::fake('github', GitHubUser::fake(['id' => '583231', 'nickname' => 'octocat', 'name' => 'The Octocat']));
+
+    $this->get(route('login.store'));
+
+    $user = User::query()->where('github_id', '583231')->sole();
+    $tom = User::query()->where('username', 'tom')->sole();
+
+    expect($user->isFollowing($tom))->toBeTrue()
+        ->and($tom->isFollowing($user))->toBeTrue();
+
+    $returning = User::factory()->create(['github_id' => '1']);
+
+    Socialite::fake('github', GitHubUser::fake(['id' => '1', 'nickname' => $returning->username, 'name' => $returning->name]));
+
+    $this->post(route('logout'));
+    $this->get(route('login.store'));
+
+    expect($returning->isFollowing($tom))->toBeFalse();
 });
