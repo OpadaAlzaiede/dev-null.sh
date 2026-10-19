@@ -58,11 +58,10 @@ export function UserSafetyMenu({
                 changeOpen(false, false);
             },
             onSuccess: () => {
-<<<<<<< HEAD
                 clearMentionSuggestionsCache();
-=======
+
                 onSuccess?.();
->>>>>>> 06e25c25db5189ac8d34903fa9c1c64ad21ceedd
+
                 router.flushAll();
             },
         });
